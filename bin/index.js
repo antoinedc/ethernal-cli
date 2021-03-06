@@ -36,14 +36,15 @@ async function connect() {
         }
     }
     else {
-        var settings = await db.settings();
-        rpcServer = new URL(db.workspace.rpcServer);
+        var rpcServer = db.workspace.rpcServer;
         var provider = Web3.providers.WebsocketProvider;
-        if (rpcServer.protocol == 'http' || rpcServer.protocol == 'https') {
-            provider = Web3.providers.HttpProvider;
+        if (rpcServer.startsWith('http') || rpcServer.startsWith('https')) {
+            web3 = new Web3(rpcServer);
         }
-
-        web3 = new Web3(new provider(rpcServer));
+        else {
+            web3 = new Web3(new provider(rpcServer));    
+        }
+        
         subscribe();
     }
 }
@@ -58,12 +59,15 @@ async function subscribe() {
 function watchDirectories() {
     var workingDirectories = options.dir ? options.dir : ['.'];
     workingDirectories.forEach((dir) => {
-        var projectConfig = getProjectConfig(dir);
-        if (projectConfig) {
-            var projectType = projectConfig.truffle_directory ? 'Truffle' : 'Unknown';
-            console.log(`Detected ${projectType} project for ${projectConfig.working_directory}`)
-            if (projectType == 'Truffle') {
-                watchTruffleArtifacts(dir, projectConfig);
+        var projectInfo = getProjectConfig(dir);
+        if (projectInfo) {
+            if (projectInfo.type == 'Truffle') {
+                console.log(`Detected ${projectInfo.type} project for ${projectInfo.config.working_directory}`)
+                watchTruffleArtifacts(dir, projectInfo.config);
+            }
+            if (projectInfo.type == 'Brownie') {
+                console.log(`Detected ${projectInfo.type} project for ${dir}`)
+                watchBrownieArtifacts(dir);
             }
         }
     });
@@ -98,7 +102,7 @@ async function catchupBlocks() {
 }
 
 function onConnected() {
-    console.log(`Connected to ${rpcServer}`);
+    console.log(`Connected to ${db.workspace.rpcServer}`);
     if (options.server) {
         console.log('Server option activated - only listening to transactions');
     }
@@ -117,6 +121,7 @@ function onData(blockHeader, error) {
 }
 
 function onError(error) {
+    console.log(error)
     if (error && error.reason) {
         console.log(`Could not connect to ${rpcServer}. Error: ${error.reason}`);
     }
@@ -141,10 +146,27 @@ function getProjectConfig(dir) {
         base: 'hardhat.config.js'
     });
 
+    var brownieConfigPath = path.format({
+        dir: dir,
+        base: 'brownie-config.yaml'
+    });
+
     try {
-        return TruffleConfig.detect({ workingDirectory: truffleConfigPath });
+        var isBrownieProject = fs.existsSync(brownieConfigPath);
+        if (isBrownieProject) {
+            return {
+                type: 'Brownie'
+            };
+        };
+        const truffleConfig = TruffleConfig.detect({ workingDirectory: truffleConfigPath });
+        if (truffleConfig) {
+            return {
+                type: 'Truffle',
+                config: truffleConfig
+            };
+        }
     } catch(e) {
-        console.log(`${dir} does not contain a truffle-config.js file, contracts metadata won't be uploaded automatically.`);
+        console.log(`${dir} does not appear to be a Truffle or Brownie project, contracts metadata won't be uploaded automatically.`);
         var isHardhatProject = fs.existsSync(hardhatConfigPath);
         if (isHardhatProject) {
             console.log(`${dir} appears to be a Hardhat project, if you are looking to synchronize contracts metadata, please look at our dedicated plugin here: https://github.com/tryethernal/hardhat-ethernal.`);
@@ -189,6 +211,23 @@ function watchTruffleArtifacts(dir, projectConfig) {
         });
 }
 
+function watchBrownieArtifacts(dir) {
+    if (!dir) {
+        console.log('Please specify a directory to watch.');
+        return;
+    }
+    
+    const artifactsDir = `${dir}${path.sep}build${path.sep}contracts`;
+
+    const watcher = chokidar.watch('.', { cwd: artifactsDir })
+        .on('add', (path) => {
+            updateContractArtifact(getBrownieArtifact(artifactsDir, path));
+        })
+        .on('change', (path) => {
+            updateContractArtifact(getBrownieArtifact(artifactsDir, path));
+        });
+}
+
 function getTruffleArtifact(artifactsDir, fileName) {
     console.log(`Getting artifact for ${fileName} in ${artifactsDir}`);
     var contract;
@@ -223,6 +262,27 @@ function getTruffleArtifact(artifactsDir, fileName) {
         }
     }
     return contract;
+}
+
+function getBrownieArtifact(artifactsDir, fileName) {
+    console.log(`Getting artifact for ${fileName} in ${artifactsDir}`);
+    var deploymentMapPath = `${artifactsDir}${path.sep}..${path.sep}deployments`;
+    var deploymentMap = fs.readFileSync(path.format({ dir: deploymentMapPath, base: 'map.json' }));
+    var parsedDeploymentMap = JSON.parse(deploymentMap);
+    var address;
+    for (const network in parsedDeploymentMap) {
+        var contractName = fileName.split('.')[0];
+        if (contractName && parsedDeploymentMap[network][contractName]) {
+            address = parsedDeploymentMap[network][contractName][0];
+            
+            if (address) {
+                var rawArtifact = fs.readFileSync(path.format({ dir: artifactsDir, base: fileName }), 'utf8');
+                var parsedArtifact = JSON.parse(rawArtifact);
+                var artifactDependencies = getArtifactDependencies(parsedArtifact);
+                console.log(artifactDependencies)
+            }
+        }
+    }
 }
 
 function getArtifactDependencies(parsedArtifact) {
@@ -332,7 +392,8 @@ async function login() {
 
 async function getDefaultWorkspace() {
     var workspaces = await db.workspaces();
-    var defaultWorkspace = await db.getWorkspace(workspaces[0]);
+    var currentWorkspace = await db.currentWorkspace();
+    var defaultWorkspace = await db.getWorkspace(currentWorkspace);
     return defaultWorkspace;
 }
 

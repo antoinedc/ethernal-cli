@@ -45,6 +45,14 @@ var _DB = class DB {
         return ref;
     }
 
+    async currentWorkspace() {
+        if (!this.userId) return;
+        var snapshot = await _db.collection('users')
+            .doc(this.userId)
+            .get();
+        return snapshot.data().currentWorkspace;
+    }
+
     contractStorage(contractAddress) {
         if (!this.userId || !this.workspace) return;
         return _rtdb.ref(`/users/${this.userId}/workspaces/${this.workspace.name}/contracts/${contractAddress}`);
@@ -57,6 +65,7 @@ var _DB = class DB {
             .collection('workspaces')
             .doc(this.workspace.name)
             .get();
+
         return snapshot.data().settings;
     }
     
